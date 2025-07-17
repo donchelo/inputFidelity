@@ -7,10 +7,17 @@ import numpy as np
 import torch
 from openai import OpenAI
 
+API_KEY_FILE = os.path.join(os.path.dirname(__file__), ".openai_api_key")
+
 class OpenAIImageEditNode:
     """
     Nodo personalizado para ComfyUI que edita imágenes usando la API de OpenAI.
     Puede combinar dos imágenes horizontalmente o usar solo una, según los inputs.
+
+    API Key:
+    - Si el usuario la escribe en el campo del nodo, se guarda automáticamente en un archivo oculto interno.
+    - Si el campo está vacío, se intenta leer la clave guardada.
+    - Si no existe, se usa la variable de entorno OPENAI_API_KEY.
     """
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("Imagen editada",)
@@ -73,6 +80,24 @@ class OpenAIImageEditNode:
         new_img.paste(img2, (img1.width, 0))
         return new_img
 
+    @staticmethod
+    def _save_api_key(api_key: str):
+        try:
+            with open(API_KEY_FILE, "w") as f:
+                f.write(api_key.strip())
+        except Exception:
+            pass  # No interrumpir el flujo si no se puede guardar
+
+    @staticmethod
+    def _load_api_key() -> str:
+        try:
+            if os.path.exists(API_KEY_FILE):
+                with open(API_KEY_FILE, "r") as f:
+                    return f.read().strip()
+        except Exception:
+            pass
+        return None
+
     @classmethod
     def edit_image(cls,
                    image_1: torch.Tensor,
@@ -85,11 +110,13 @@ class OpenAIImageEditNode:
         """
         Edita la imagen (una o dos) usando la API de OpenAI y retorna el resultado como tensor ComfyUI.
         """
-        # 1. Validar API key
-        api_key = api_key or os.getenv("OPENAI_API_KEY")
-        if not api_key:
+        # 1. Obtener y guardar API key si es necesario
+        if api_key and api_key.strip():
+            cls._save_api_key(api_key)
+        api_key_final = api_key.strip() if api_key and api_key.strip() else cls._load_api_key() or os.getenv("OPENAI_API_KEY")
+        if not api_key_final:
             raise ValueError("No se proporcionó la API key de OpenAI.")
-        client = OpenAI(api_key=api_key)
+        client = OpenAI(api_key=api_key_final)
 
         # 2. Convertir tensores a PIL
         img1 = cls.tensor_to_pil(image_1)
