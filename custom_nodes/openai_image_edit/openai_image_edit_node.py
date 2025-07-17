@@ -110,12 +110,29 @@ class OpenAIImageEditNode:
         """
         Edita la imagen (una o dos) usando la API de OpenAI y retorna el resultado como tensor ComfyUI.
         """
+        # --- Input validation ---
+        if not isinstance(image_1, torch.Tensor):
+            raise ValueError("image_1 must be a torch.Tensor.")
+        if image_1.ndim not in (3, 4):
+            raise ValueError("image_1 must have 3 or 4 dimensions (C,H,W) or (1,C,H,W).")
+        if image_1.shape[-3] not in (1, 3):
+            raise ValueError("image_1 must have 1 or 3 channels (grayscale or RGB).")
+        if image_2 is not None:
+            if not isinstance(image_2, torch.Tensor):
+                raise ValueError("image_2 must be a torch.Tensor if provided.")
+            if image_2.ndim not in (3, 4):
+                raise ValueError("image_2 must have 3 or 4 dimensions (C,H,W) or (1,C,H,W).")
+            if image_2.shape[-3] not in (1, 3):
+                raise ValueError("image_2 must have 1 or 3 channels (grayscale or RGB).")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("Prompt must be a non-empty string.")
+
         # 1. Obtener y guardar API key si es necesario
         if api_key and api_key.strip():
             cls._save_api_key(api_key)
         api_key_final = api_key.strip() if api_key and api_key.strip() else cls._load_api_key() or os.getenv("OPENAI_API_KEY")
         if not api_key_final:
-            raise ValueError("No se proporcionó la API key de OpenAI.")
+            raise ValueError("OpenAI API key was not provided.")
         client = OpenAI(api_key=api_key_final)
 
         # 2. Convertir tensores a PIL
@@ -132,17 +149,26 @@ class OpenAIImageEditNode:
         combined_img.save(img_bytes, format="PNG")
         img_bytes.seek(0)
 
-        # 5. Llamar a la API de OpenAI
-        response = client.images.edit(
-            image=img_bytes,
-            prompt=prompt,
-            input_fidelity=input_fidelity,
-            quality=quality
-        )
-        # 6. Procesar respuesta base64 a PIL
-        b64_data = response.data[0].b64_json
-        img_data = base64.b64decode(b64_data)
-        result_img = Image.open(io.BytesIO(img_data)).convert("RGB")
+        # 5. Llamar a la API de OpenAI con manejo de errores
+        try:
+            response = client.images.edit(
+                image=img_bytes,
+                prompt=prompt,
+                input_fidelity=input_fidelity,
+                quality=quality
+            )
+        except Exception as e:
+            raise RuntimeError(f"OpenAI API call failed: {str(e)}")
+
+        # 6. Procesar respuesta base64 a PIL con manejo de errores
+        try:
+            if not hasattr(response, 'data') or not response.data or not hasattr(response.data[0], 'b64_json'):
+                raise RuntimeError("OpenAI API response is missing expected fields.")
+            b64_data = response.data[0].b64_json
+            img_data = base64.b64decode(b64_data)
+            result_img = Image.open(io.BytesIO(img_data)).convert("RGB")
+        except Exception as e:
+            raise RuntimeError(f"Failed to process OpenAI API response: {str(e)}")
 
         # 7. Convertir a tensor ComfyUI
         result_tensor = cls.pil_to_tensor(result_img)
