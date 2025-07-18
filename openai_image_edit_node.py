@@ -111,9 +111,27 @@ class OpenAIImageEditNode:
             import openai
             self._openai_version = openai.__version__
             logger.info(f"OpenAI versión: {self._openai_version}")
+            
+            # Verificar si input_fidelity está soportado
+            self._supports_input_fidelity = self._test_input_fidelity_support()
+            logger.info(f"Soporte input_fidelity: {self._supports_input_fidelity}")
+            
         except Exception as e:
             logger.warning(f"No se pudo verificar versión OpenAI: {e}")
             self._openai_version = "unknown"
+            self._supports_input_fidelity = False
+
+    def _test_input_fidelity_support(self) -> bool:
+        """Verifica si el cliente OpenAI actual soporta input_fidelity."""
+        try:
+            import inspect
+            sig = inspect.signature(self._client.images.edit)
+            supported = "input_fidelity" in sig.parameters
+            logger.info(f"Parámetro input_fidelity {'soportado' if supported else 'no soportado'}")
+            return supported
+        except Exception as e:
+            logger.warning(f"No se pudo verificar soporte input_fidelity: {e}")
+            return False
 
     def _load_config(self) -> Dict[str, Any]:
         """Carga la configuración desde archivo JSON."""
@@ -385,9 +403,8 @@ class OpenAIImageEditNode:
                 "prompt": prompt.strip()
             }
             
-            # Llamada exacta según documentación oficial
+            # Llamada directa con gpt-image-1 e input_fidelity
             try:
-                # Parámetros oficiales según cookbook OpenAI
                 edit_params = base_params.copy()
                 edit_params.update({
                     "input_fidelity": input_fidelity,
@@ -395,47 +412,33 @@ class OpenAIImageEditNode:
                     "output_format": output_format
                 })
                 
-                logger.info(f"🎯 Llamando API con parámetros oficiales:")
+                logger.info(f"🎯 Llamando API con gpt-image-1 e input_fidelity:")
                 logger.info(f"   model: {edit_params['model']}")
                 logger.info(f"   input_fidelity: {edit_params['input_fidelity']}")
                 logger.info(f"   quality: {edit_params['quality']}")
                 logger.info(f"   output_format: {edit_params['output_format']}")
                 
                 response = client.images.edit(**edit_params)
-                logger.info("✅ ¡Éxito con input_fidelity='high'!")
+                logger.info("✅ ¡Éxito con gpt-image-1 e input_fidelity!")
                 return response
                 
             except Exception as edit_error:
-                logger.warning(f"⚠️ Llamada con todos los parámetros falló: {edit_error}")
+                logger.error(f"⚠️ Error con gpt-image-1: {edit_error}")
                 
-                # Intentar sin output_format como fallback
-                try:
-                    fallback_params = base_params.copy()
-                    fallback_params.update({
-                        "input_fidelity": input_fidelity,
-                        "quality": quality
-                    })
-                    
-                    logger.info("🔄 Reintentando sin output_format...")
-                    response = client.images.edit(**fallback_params)
-                    logger.info("✅ Éxito sin output_format")
-                    return response
-                    
-                except Exception as fallback_error:
-                    logger.error(f"⚠️ Fallback también falló: {fallback_error}")
-                    
-                    # Analizar tipos de error específicos
-                    error_str = str(fallback_error).lower()
-                    if "rate_limit" in error_str or "rate limit" in error_str:
-                        raise ValueError("Límite de velocidad de API alcanzado. Espera unos minutos.")
-                    elif "authentication" in error_str or "unauthorized" in error_str:
-                        raise ValueError("Error de autenticación. Verifica tu API key.")
-                    elif "billing" in error_str or "quota" in error_str:
-                        raise ValueError("Error de facturación. Verifica tu cuenta OpenAI.")
-                    elif "invalid" in error_str and "model" in error_str:
-                        raise ValueError("Modelo gpt-image-1 no disponible. Verifica tu acceso.")
-                    else:
-                        raise ValueError(f"Error de API: {fallback_error}")
+                # Analizar tipos de error específicos
+                error_str = str(edit_error).lower()
+                if "rate_limit" in error_str or "rate limit" in error_str:
+                    raise ValueError("Límite de velocidad de API alcanzado. Espera unos minutos.")
+                elif "authentication" in error_str or "unauthorized" in error_str:
+                    raise ValueError("Error de autenticación. Verifica tu API key.")
+                elif "billing" in error_str or "quota" in error_str:
+                    raise ValueError("Error de facturación. Verifica tu cuenta OpenAI.")
+                elif "invalid" in error_str and "model" in error_str:
+                    raise ValueError("Modelo gpt-image-1 no disponible. Verifica tu acceso.")
+                elif "unexpected keyword argument" in error_str:
+                    raise ValueError("Parámetros no soportados. Verifica tu versión de OpenAI library.")
+                else:
+                    raise ValueError(f"Error de API: {edit_error}")
         
         except Exception as e:
             logger.error(f"Error en llamada a API: {e}")
