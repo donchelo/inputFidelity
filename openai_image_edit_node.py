@@ -1,5 +1,5 @@
 # Autor: chelo
-# Versión corregida y mejorada del nodo OpenAI Image Edit
+# Versión corregida con soporte para input_fidelity usando ambas APIs de OpenAI
 
 import os
 import io
@@ -7,7 +7,7 @@ import json
 import base64
 import logging
 import hashlib
-from typing import Any, Tuple, Optional, Dict, Union
+from typing import Any, Tuple, Optional, Dict, Union, List
 from contextlib import contextmanager
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
@@ -24,34 +24,38 @@ API_KEY_FILE = os.path.join(os.path.dirname(__file__), "openai_api_key.txt")
 
 # Configuración por defecto
 DEFAULT_CONFIG = {
-    "default_quality": "hd",
-    "default_fidelity": "high",
+    "default_quality": "high",
+    "default_fidelity": "high", 
     "default_output_format": "png",
     "max_image_size": 2048,
-    "timeout": 30,
+    "timeout": 120,  # Aumentado para input_fidelity
     "cache_enabled": True,
     "max_cache_size": 10,
-    "error_image_color": [255, 0, 0],  # Rojo para errores
-    "combine_background_color": [255, 255, 255]  # Blanco para combinaciones
+    "error_image_color": [255, 0, 0],
+    "combine_background_color": [255, 255, 255],
+    "prefer_responses_api": True  # Nuevo: preferir Responses API
 }
 
 class OpenAIImageEditNode:
     """
-    Nodo personalizado para ComfyUI que edita imágenes usando la API de OpenAI.
+    Nodo personalizado para ComfyUI que edita imágenes usando OpenAI API con alta fidelidad.
+    Soporta tanto Image API como Responses API para máxima compatibilidad.
     """
     
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("edited_image",)
     FUNCTION = "execute"
     CATEGORY = "image/ai"
-    DESCRIPTION = "Edita imágenes usando OpenAI API con alta fidelidad y combinación de imágenes"
+    DESCRIPTION = "Edita imágenes con OpenAI API usando input_fidelity='high' (Image API + Responses API)"
 
     def __init__(self):
-        """Inicializa el nodo con configuración y cache."""
+        """Inicializa el nodo con configuración y detección de características."""
         self.config = self._load_config()
         self._cache = {} if self.config.get("cache_enabled", True) else None
         self._client = None
-        logger.info("OpenAI Image Edit Node inicializado")
+        self._openai_version = None
+        self._api_capabilities = None
+        logger.info("OpenAI Image Edit Node (Dual API) inicializado")
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
@@ -59,7 +63,7 @@ class OpenAIImageEditNode:
         return {
             "required": {
                 "image_1": ("IMAGE", {
-                    "tooltip": "Imagen principal a editar"
+                    "tooltip": "Imagen principal a editar (preserva máximo detalle)"
                 }),
                 "prompt": ("STRING", {
                     "multiline": True, 
@@ -69,7 +73,7 @@ class OpenAIImageEditNode:
             },
             "optional": {
                 "image_2": ("IMAGE", {
-                    "tooltip": "Segunda imagen para combinación horizontal (opcional)"
+                    "tooltip": "Segunda imagen para combinación (opcional)"
                 }),
                 "api_key": ("STRING", {
                     "default": "", 
@@ -78,29 +82,88 @@ class OpenAIImageEditNode:
                 }),
                 "input_fidelity": (["low", "high"], {
                     "default": "high",
-                    "tooltip": "Calidad de procesamiento: 'high' preserva más detalles"
+                    "tooltip": "CRÍTICO: 'high' preserva detalles de caras, logos y texturas"
                 }),
-                "quality": (["standard", "hd"], {
-                    "default": "hd",
-                    "tooltip": "Calidad de la imagen de salida"
+                "quality": (["standard", "high"], {
+                    "default": "high",
+                    "tooltip": "Calidad de imagen: 'high' para mejor resolución"
                 }),
                 "output_format": (["png", "jpeg", "webp"], {
                     "default": "png",
-                    "tooltip": "Formato de imagen de salida"
+                    "tooltip": "Formato de salida (PNG recomendado para transparencias)"
+                }),
+                "api_method": (["auto", "responses_api", "image_api"], {
+                    "default": "auto",
+                    "tooltip": "API a usar: 'auto' detecta automáticamente, 'responses_api' para input_fidelity garantizado"
                 }),
                 "max_size": ("INT", {
                     "default": 1024, 
                     "min": 256, 
                     "max": 2048, 
                     "step": 64,
-                    "tooltip": "Tamaño máximo de imagen en píxeles"
+                    "tooltip": "Tamaño máximo en píxeles"
                 }),
                 "enable_cache": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "Habilitar cache para mejorar performance"
+                    "tooltip": "Cache para mejorar rendimiento"
+                }),
+                "force_update_client": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Forzar actualización del cliente OpenAI"
                 }),
             }
         }
+
+    def _detect_api_capabilities(self) -> Dict[str, bool]:
+        """Detecta qué características están disponibles en la versión actual de OpenAI."""
+        if self._api_capabilities is not None:
+            return self._api_capabilities
+            
+        capabilities = {
+            "image_api_input_fidelity": False,
+            "responses_api_available": False,
+            "gpt_image_1_available": False
+        }
+        
+        try:
+            import inspect
+            
+            # Verificar si Image API soporta input_fidelity
+            try:
+                sig = inspect.signature(self._client.images.edit)
+                capabilities["image_api_input_fidelity"] = "input_fidelity" in sig.parameters
+            except Exception as e:
+                logger.warning(f"No se pudo inspeccionar images.edit: {e}")
+            
+            # Verificar si Responses API está disponible
+            try:
+                capabilities["responses_api_available"] = hasattr(self._client, 'responses')
+            except Exception as e:
+                logger.warning(f"No se pudo verificar responses API: {e}")
+                
+            # Verificar versión de librería
+            try:
+                import openai
+                version = openai.__version__
+                self._openai_version = version
+                logger.info(f"OpenAI Python library version: {version}")
+                
+                # Versiones que soportan input_fidelity
+                version_parts = version.split('.')
+                if len(version_parts) >= 2:
+                    major, minor = int(version_parts[0]), int(version_parts[1])
+                    if major > 1 or (major == 1 and minor >= 50):  # Estimación
+                        capabilities["gpt_image_1_available"] = True
+                        
+            except Exception as e:
+                logger.warning(f"Error verificando versión OpenAI: {e}")
+        
+        except Exception as e:
+            logger.error(f"Error detectando capacidades de API: {e}")
+        
+        self._api_capabilities = capabilities
+        logger.info(f"🔍 Capacidades detectadas: {capabilities}")
+        return capabilities
 
     def _load_config(self) -> Dict[str, Any]:
         """Carga la configuración desde archivo JSON."""
@@ -112,6 +175,7 @@ class OpenAIImageEditNode:
                     merged_config.update(config)
                     logger.info("Configuración cargada desde archivo")
                     return merged_config
+                    
         except Exception as e:
             logger.warning(f"Error cargando configuración: {e}")
         
@@ -152,15 +216,6 @@ class OpenAIImageEditNode:
             logger.warning(f"Error cargando API key: {e}")
         return None
 
-    @contextmanager
-    def _image_buffer(self):
-        """Context manager para manejo seguro de buffers de imagen."""
-        buffer = io.BytesIO()
-        try:
-            yield buffer
-        finally:
-            buffer.close()
-
     def create_error_image(self, width: int = 512, height: int = 512, 
                           message: str = "ERROR") -> torch.Tensor:
         """Crea una imagen de error para casos fallidos."""
@@ -179,63 +234,45 @@ class OpenAIImageEditNode:
             return self.pil_to_tensor(error_img)
         except Exception as e:
             logger.error(f"Error creando imagen de error: {e}")
-            # Fallback: crear tensor directamente en formato ComfyUI
-            # [batch, height, width, channels] con valores float32 en [0,1]
             error_tensor = torch.zeros(1, height, width, 3, dtype=torch.float32)
             error_tensor[:, :, :, 0] = 1.0  # Canal rojo para error
             return error_tensor
 
     @staticmethod
     def tensor_to_pil(tensor: torch.Tensor) -> Image.Image:
-        """
-        Convierte un tensor ComfyUI a una imagen PIL en formato RGBA.
-        ComfyUI usa formato [batch, height, width, channels] con float32 en [0,1]
-        """
+        """Convierte un tensor ComfyUI a una imagen PIL en formato RGBA."""
         try:
-            # Validar entrada
             if not isinstance(tensor, torch.Tensor):
                 raise ValueError("El input debe ser un torch.Tensor")
             
-            # Manejar diferentes formatos de tensor
             if tensor.ndim == 4:
-                # Formato batch: [batch, height, width, channels]
                 if tensor.shape[0] != 1:
                     raise ValueError(f"Batch size debe ser 1, es {tensor.shape[0]}")
-                tensor = tensor[0]  # Remover dimensión de batch: [height, width, channels]
+                tensor = tensor[0]
             elif tensor.ndim == 3:
-                # Ya está en formato [height, width, channels]
                 pass
             else:
                 raise ValueError(f"Tensor debe tener 3 o 4 dimensiones, tiene {tensor.ndim}")
             
-            # Verificar que tenemos el formato correcto [H, W, C]
             if tensor.shape[-1] not in [1, 3, 4]:
-                # Podría estar en formato [C, H, W], intentar transponer
                 if tensor.shape[0] in [1, 3, 4]:
-                    tensor = tensor.permute(1, 2, 0)  # [C, H, W] -> [H, W, C]
+                    tensor = tensor.permute(1, 2, 0)
                 else:
                     raise ValueError(f"No se puede determinar el formato del tensor: {tensor.shape}")
             
-            # Convertir a numpy y asegurar rango [0, 255]
             if tensor.dtype == torch.float32 or tensor.dtype == torch.float64:
-                # Asumir que está en rango [0, 1]
                 array = (tensor.clamp(0, 1) * 255).byte().cpu().numpy()
             else:
-                # Asumir que ya está en rango [0, 255]
                 array = tensor.clamp(0, 255).byte().cpu().numpy()
             
-            # Manejar diferentes números de canales y convertir a RGBA
             if array.shape[-1] == 1:
-                # Grayscale -> RGBA
                 rgb_array = np.repeat(array, 3, axis=-1)
                 rgba_array = np.concatenate([rgb_array, np.full((*array.shape[:2], 1), 255, dtype=np.uint8)], axis=-1)
                 img = Image.fromarray(rgba_array, mode='RGBA')
             elif array.shape[-1] == 3:
-                # RGB -> RGBA (añadir canal alfa completamente opaco)
                 rgba_array = np.concatenate([array, np.full((*array.shape[:2], 1), 255, dtype=np.uint8)], axis=-1)
                 img = Image.fromarray(rgba_array, mode='RGBA')
             elif array.shape[-1] == 4:
-                # Ya es RGBA
                 img = Image.fromarray(array, mode='RGBA')
             else:
                 raise ValueError(f"Número de canales no soportado: {array.shape[-1]}")
@@ -249,41 +286,28 @@ class OpenAIImageEditNode:
 
     @staticmethod
     def pil_to_tensor(img: Image.Image) -> torch.Tensor:
-        """
-        Convierte una imagen PIL a tensor ComfyUI.
-        ComfyUI espera formato [batch, height, width, channels] con float32 en [0,1]
-        Convierte RGBA a RGB para ComfyUI.
-        """
+        """Convierte una imagen PIL a tensor ComfyUI."""
         try:
             if img is None:
                 raise ValueError("La imagen no puede ser None")
             
-            # Si la imagen es RGBA, convertir a RGB con fondo blanco
             if img.mode == 'RGBA':
-                # Crear fondo blanco
                 background = Image.new('RGB', img.size, (255, 255, 255))
-                # Componer la imagen RGBA sobre el fondo blanco
-                background.paste(img, mask=img.split()[-1])  # Usar canal alfa como máscara
+                background.paste(img, mask=img.split()[-1])
                 img = background
             elif img.mode != 'RGB':
-                # Convertir cualquier otro formato a RGB
                 img = img.convert('RGB')
             
-            # Convertir a numpy array
-            array = np.array(img, dtype=np.float32)  # [H, W, 3]
+            array = np.array(img, dtype=np.float32)
             
-            # Normalizar a rango [0, 1]
             if array.max() > 1.0:
                 array = array / 255.0
             
-            # Verificar dimensiones
             if array.ndim != 3 or array.shape[2] != 3:
                 raise ValueError(f"Array debe ser [H, W, 3], es {array.shape}")
             
-            # Convertir a tensor y añadir dimensión de batch
-            tensor = torch.from_numpy(array).unsqueeze(0)  # [1, H, W, 3]
+            tensor = torch.from_numpy(array).unsqueeze(0)
             
-            # Verificar que el tensor tiene el formato correcto
             assert tensor.ndim == 4, f"Tensor debe tener 4 dimensiones, tiene {tensor.ndim}"
             assert tensor.shape[0] == 1, f"Batch size debe ser 1, es {tensor.shape[0]}"
             assert tensor.shape[3] == 3, f"Debe tener 3 canales, tiene {tensor.shape[3]}"
@@ -300,40 +324,32 @@ class OpenAIImageEditNode:
 
     def combine_images_horizontally(self, img1: Image.Image, 
                                   img2: Image.Image) -> Image.Image:
-        """Combina dos imágenes PIL horizontalmente en formato RGBA."""
+        """Combina dos imágenes horizontalmente según patrón de documentación OpenAI."""
         try:
             if img1 is None or img2 is None:
                 raise ValueError("Las imágenes no pueden ser None")
             
-            # Asegurar formato RGBA para ambas imágenes
             if img1.mode != 'RGBA':
                 img1 = img1.convert('RGBA')
             if img2.mode != 'RGBA':
                 img2 = img2.convert('RGBA')
             
-            # Igualar altura
-            target_height = max(img1.height, img2.height)
-            
-            if img1.height != target_height:
-                ratio = target_height / img1.height
-                new_width = int(img1.width * ratio)
-                img1 = img1.resize((new_width, target_height), Image.LANCZOS)
+            target_height = img1.height
             
             if img2.height != target_height:
                 ratio = target_height / img2.height
                 new_width = int(img2.width * ratio)
                 img2 = img2.resize((new_width, target_height), Image.LANCZOS)
             
-            # Crear imagen combinada en RGBA
             total_width = img1.width + img2.width
             bg_color = tuple(self.config.get("combine_background_color", [255, 255, 255]))
             
-            # Crear canvas RGBA con fondo opaco
             combined = Image.new("RGBA", (total_width, target_height), color=bg_color + (255,))
-            combined.paste(img1, (0, 0), img1)  # Usar img1 como máscara para transparencia
-            combined.paste(img2, (img1.width, 0), img2)  # Usar img2 como máscara para transparencia
             
-            logger.info(f"Imágenes combinadas en RGBA: {total_width}x{target_height}")
+            combined.paste(img1, (0, 0), img1)
+            combined.paste(img2, (img1.width, 0), img2)
+            
+            logger.info(f"Imágenes combinadas (imagen1={img1.size}, imagen2={img2.size}) -> {total_width}x{target_height}")
             return combined
             
         except Exception as e:
@@ -355,38 +371,7 @@ class OpenAIImageEditNode:
         
         return img
 
-    def _validate_inputs(self, image_1: torch.Tensor, image_2: Optional[torch.Tensor],
-                        prompt: str, input_fidelity: str, quality: str,
-                        output_format: str, max_size: int) -> None:
-        """Valida todos los inputs del nodo."""
-        # Validar imagen principal
-        if not isinstance(image_1, torch.Tensor):
-            raise ValueError("image_1 debe ser un torch.Tensor")
-        if image_1.ndim not in (3, 4):
-            raise ValueError("image_1 debe tener 3 o 4 dimensiones")
-        
-        # Validar imagen secundaria si existe
-        if image_2 is not None:
-            if not isinstance(image_2, torch.Tensor):
-                raise ValueError("image_2 debe ser un torch.Tensor")
-            if image_2.ndim not in (3, 4):
-                raise ValueError("image_2 debe tener 3 o 4 dimensiones")
-        
-        # Validar prompt
-        if not isinstance(prompt, str) or len(prompt.strip()) < 3:
-            raise ValueError("El prompt debe ser una cadena de al menos 3 caracteres")
-        
-        # Validar parámetros
-        if input_fidelity not in ["low", "high"]:
-            raise ValueError("input_fidelity debe ser 'low' o 'high'")
-        if quality not in ["standard", "hd"]:
-            raise ValueError("quality debe ser 'standard' o 'hd'")
-        if output_format not in ["png", "jpeg", "webp"]:
-            raise ValueError("output_format debe ser 'png', 'jpeg' o 'webp'")
-        if not isinstance(max_size, int) or max_size < 256 or max_size > 2048:
-            raise ValueError("max_size debe ser un entero entre 256 y 2048")
-
-    def _get_openai_client(self, api_key: Optional[str] = None) -> OpenAI:
+    def _get_openai_client(self, api_key: Optional[str] = None, force_update: bool = False) -> OpenAI:
         """Obtiene cliente OpenAI con gestión de API key."""
         if api_key and api_key.strip():
             self._save_api_key(api_key)
@@ -407,26 +392,203 @@ class OpenAIImageEditNode:
         if not final_api_key.startswith(('sk-', 'sk-proj-')):
             raise ValueError("API key no tiene el formato esperado de OpenAI")
         
-        if self._client is None or getattr(self._client, '_api_key', None) != final_api_key:
-            timeout = self.config.get("timeout", 30)
+        if self._client is None or getattr(self._client, '_api_key', None) != final_api_key or force_update:
+            timeout = self.config.get("timeout", 120)
             self._client = OpenAI(
                 api_key=final_api_key,
                 timeout=timeout
             )
-            logger.info("Cliente OpenAI inicializado")
+            logger.info("Cliente OpenAI inicializado/actualizado")
             
-            # Validación simple de API key
-            try:
-                logger.info("🔍 Validando API key...")
-                # Usar una llamada simple que siempre funciona
-                self._client.models.list()
-                logger.info("✓ API key válida")
-            except Exception as validation_error:
-                # No fallar por errores de validación, solo avisar
-                logger.warning(f"⚠️ No se pudo validar API key: {validation_error}")
-                logger.info("Continuando con la ejecución...")
+            # Detectar capacidades después de inicializar
+            self._detect_api_capabilities()
         
         return self._client
+
+    def _prepare_image_for_api(self, img: Image.Image, output_format: str) -> Tuple[str, bytes, str]:
+        """Prepara imagen para API de OpenAI según especificaciones oficiales."""
+        try:
+            if img.mode != 'RGBA':
+                img = img.convert('RGBA')
+                logger.info("Imagen convertida a RGBA para compatibilidad OpenAI")
+            
+            format_map = {
+                "png": ("PNG", "image/png"),
+                "jpeg": ("JPEG", "image/jpeg"), 
+                "webp": ("WEBP", "image/webp")
+            }
+            
+            pil_format, mime_type = format_map.get(output_format, ("PNG", "image/png"))
+            
+            if pil_format == "JPEG" and img.mode == 'RGBA':
+                background = Image.new('RGB', img.size, (255, 255, 255))
+                background.paste(img, mask=img.split()[-1])
+                img = background
+                logger.info("Imagen convertida a RGB para formato JPEG")
+            
+            img_buffer = io.BytesIO()
+            img.save(img_buffer, format=pil_format, quality=95 if pil_format == "JPEG" else None)
+            img_bytes = img_buffer.getvalue()
+            
+            if len(img_bytes) == 0:
+                raise ValueError("La imagen resultó vacía después de la conversión")
+            
+            if len(img_bytes) > 4 * 1024 * 1024:  # 4MB límite OpenAI
+                raise ValueError(f"Imagen demasiado grande: {len(img_bytes)/1024/1024:.1f}MB > 4MB")
+            
+            filename = f"image.{output_format.lower()}"
+            logger.info(f"Imagen preparada: {filename}, {len(img_bytes)/1024:.1f}KB, {mime_type}")
+            
+            return (filename, img_bytes, mime_type)
+            
+        except Exception as e:
+            logger.error(f"Error preparando imagen para API: {e}")
+            raise
+
+    def _call_responses_api(self, client: OpenAI, image_tuple: Tuple[str, bytes, str], 
+                           prompt: str, input_fidelity: str, quality: str, 
+                           output_format: str) -> Any:
+        """
+        Usa la Responses API que garantiza soporte para input_fidelity.
+        Según documentación oficial OpenAI.
+        """
+        try:
+            # Crear file-like object para la imagen
+            filename, img_bytes, mime_type = image_tuple
+            
+            # Codificar imagen en base64 para Responses API
+            image_b64 = base64.b64encode(img_bytes).decode('utf-8')
+            data_url = f"data:{mime_type};base64,{image_b64}"
+            
+            # Configurar tool con input_fidelity (según documentación)
+            tool_config = {
+                "type": "image_generation",
+                "input_fidelity": input_fidelity,
+                "quality": quality
+            }
+            
+            # Agregar output_format si es soportado
+            if output_format in ["png", "jpeg", "webp"]:
+                tool_config["output_format"] = output_format
+            
+            logger.info(f"🔄 Usando Responses API con configuración: {tool_config}")
+            
+            response = client.responses.create(
+                model="gpt-4o",  # Modelo que soporta image_generation tool
+                input=[
+                    {
+                        "role": "user", 
+                        "content": [
+                            {"type": "input_text", "text": prompt.strip()},
+                            {"type": "input_image", "image_url": data_url}
+                        ]
+                    }
+                ],
+                tools=[tool_config]
+            )
+            
+            logger.info("✅ Respuesta exitosa desde Responses API")
+            return response
+            
+        except Exception as e:
+            logger.error(f"Error en Responses API: {e}")
+            raise
+
+    def _call_image_api(self, client: OpenAI, image_tuple: Tuple[str, bytes, str], 
+                       prompt: str, input_fidelity: str, quality: str, 
+                       output_format: str) -> Any:
+        """
+        Usa la Image API tradicional con fallbacks inteligentes.
+        """
+        try:
+            filename, img_bytes, mime_type = image_tuple
+            
+            # Configuración base
+            base_params = {
+                "model": "gpt-image-1",
+                "image": (filename, img_bytes, mime_type),
+                "prompt": prompt.strip()
+            }
+            
+            # Detectar capacidades
+            capabilities = self._detect_api_capabilities()
+            
+            if capabilities.get("image_api_input_fidelity", False):
+                # Usar configuración completa si está soportada
+                full_params = base_params.copy()
+                full_params.update({
+                    "input_fidelity": input_fidelity,
+                    "quality": quality,
+                    "output_format": output_format
+                })
+                
+                logger.info(f"🎯 Usando Image API con input_fidelity soportado")
+                response = client.images.edit(**full_params)
+                
+            else:
+                # Fallback sin input_fidelity
+                logger.warning("⚠️ input_fidelity no soportado en Image API, usando fallback")
+                response = client.images.edit(**base_params)
+                
+            logger.info("✅ Respuesta exitosa desde Image API")
+            return response
+            
+        except Exception as e:
+            logger.error(f"Error en Image API: {e}")
+            raise
+
+    def _extract_image_from_responses_api(self, response: Any) -> bytes:
+        """Extrae datos de imagen desde respuesta de Responses API."""
+        try:
+            image_generation_calls = [
+                output for output in response.output
+                if output.type == "image_generation_call"
+            ]
+            
+            if not image_generation_calls:
+                raise ValueError("No se encontraron llamadas de generación de imagen en la respuesta")
+            
+            first_call = image_generation_calls[0]
+            
+            if hasattr(first_call, 'result') and first_call.result:
+                # La respuesta ya está en base64
+                img_data = base64.b64decode(first_call.result)
+                logger.info("📥 Imagen extraída desde Responses API (result)")
+                return img_data
+            else:
+                raise ValueError("No se encontró resultado de imagen en la respuesta")
+                
+        except Exception as e:
+            logger.error(f"Error extrayendo imagen de Responses API: {e}")
+            raise
+
+    def _extract_image_from_image_api(self, response: Any) -> bytes:
+        """Extrae datos de imagen desde respuesta de Image API."""
+        try:
+            if not hasattr(response, 'data') or not response.data:
+                raise ValueError("Respuesta sin datos válidos")
+            
+            first_item = response.data[0]
+            
+            if hasattr(first_item, 'b64_json') and first_item.b64_json:
+                img_data = base64.b64decode(first_item.b64_json)
+                logger.info("📥 Imagen extraída desde Image API (b64_json)")
+                return img_data
+            elif hasattr(first_item, 'url') and first_item.url:
+                import requests
+                url_response = requests.get(first_item.url, timeout=30)
+                if url_response.status_code == 200:
+                    img_data = url_response.content
+                    logger.info("📥 Imagen extraída desde Image API (URL)")
+                    return img_data
+                else:
+                    raise ValueError(f"Error descargando desde URL: {url_response.status_code}")
+            else:
+                raise ValueError("No se encontró imagen en la respuesta de Image API")
+                
+        except Exception as e:
+            logger.error(f"Error extrayendo imagen de Image API: {e}")
+            raise
 
     def execute(self,
                 image_1: torch.Tensor,
@@ -434,29 +596,35 @@ class OpenAIImageEditNode:
                 image_2: Optional[torch.Tensor] = None,
                 api_key: Optional[str] = None,
                 input_fidelity: str = "high",
-                quality: str = "hd",
+                quality: str = "high",
                 output_format: str = "png",
+                api_method: str = "auto",
                 max_size: int = 1024,
-                enable_cache: bool = True
+                enable_cache: bool = True,
+                force_update_client: bool = False
                 ) -> Tuple[torch.Tensor]:
         """
-        Ejecuta la edición de imagen usando la API de OpenAI.
+        Ejecuta la edición de imagen con input_fidelity usando la mejor API disponible.
         """
-        logger.info("=== Iniciando OpenAI Image Edit ===")
+        logger.info("=== OpenAI Image Edit con Dual API Support ===")
+        logger.info(f"Configuración: fidelity={input_fidelity}, quality={quality}, format={output_format}, api={api_method}")
         
-        # 1. Validación de inputs
+        # 1. Validaciones básicas
         try:
-            self._validate_inputs(image_1, image_2, prompt, input_fidelity, 
-                                quality, output_format, max_size)
-            logger.info("✓ Inputs validados correctamente")
-            logger.info(f"Input image_1 shape: {image_1.shape}, dtype: {image_1.dtype}")
-            if image_2 is not None:
-                logger.info(f"Input image_2 shape: {image_2.shape}, dtype: {image_2.dtype}")
+            if not isinstance(image_1, torch.Tensor) or image_1.ndim not in (3, 4):
+                raise ValueError("image_1 debe ser un tensor válido")
+            if image_2 is not None and (not isinstance(image_2, torch.Tensor) or image_2.ndim not in (3, 4)):
+                raise ValueError("image_2 debe ser un tensor válido o None")
+            if not isinstance(prompt, str) or len(prompt.strip()) < 3:
+                raise ValueError("El prompt debe tener al menos 3 caracteres")
+            
+            logger.info("✓ Validaciones básicas pasadas")
+            
         except ValueError as e:
             logger.error(f"✗ Error de validación: {e}")
             return (self.create_error_image(message="INVALID INPUT"),)
 
-        # 2. Convertir tensores a PIL
+        # 2. Procesar imágenes
         try:
             img1 = self.tensor_to_pil(image_1)
             img1 = self._resize_image_if_needed(img1, max_size)
@@ -474,201 +642,81 @@ class OpenAIImageEditNode:
             logger.error(f"✗ Error procesando imágenes: {e}")
             return (self.create_error_image(message="IMAGE ERROR"),)
 
-        # 3. Obtener cliente OpenAI
+        # 3. Inicializar cliente OpenAI
         try:
-            client = self._get_openai_client(api_key)
-            logger.info("✓ Cliente OpenAI listo")
+            client = self._get_openai_client(api_key, force_update_client)
+            capabilities = self._detect_api_capabilities()
+            logger.info("✓ Cliente OpenAI inicializado")
         except Exception as e:
-            logger.error(f"✗ Error inicializando cliente: {e}")
+            logger.error(f"✗ Error con cliente OpenAI: {e}")
             return (self.create_error_image(message="API ERROR"),)
 
-        # 4. Preparar imagen para API y llamar a OpenAI
+        # 4. Determinar qué API usar
         try:
-            # Asegurar que la imagen está en formato RGBA (requerido por OpenAI)
-            if combined_img.mode != 'RGBA':
-                combined_img = combined_img.convert('RGBA')
-                logger.info(f"Imagen convertida a RGBA para compatibilidad con OpenAI API")
+            use_responses_api = False
             
-            # Crear buffer temporal
-            img_buffer = io.BytesIO()
-            combined_img.save(img_buffer, format="PNG")
-            img_buffer.seek(0)
-            
-            # Validar tamaño de imagen
-            img_size = len(img_buffer.getvalue())
-            logger.info(f"✓ Imagen preparada para API - Tamaño: {img_size/1024:.1f}KB")
-            
-            # Verificar que la imagen sea válida
-            if img_size == 0:
-                raise ValueError("La imagen está vacía")
-            if img_size > 4 * 1024 * 1024:  # 4MB límite de OpenAI
-                raise ValueError(f"Imagen demasiado grande: {img_size/1024/1024:.1f}MB > 4MB")
-            
-            img_buffer.seek(0)  # Reset posición
-            
-            logger.info("⏳ Enviando a OpenAI API...")
-            
-            # Preparar imagen con tipo MIME correcto
-            img_data = img_buffer.getvalue()
-            image_tuple = ("image.png", img_data, "image/png")
-            
-            # Preparar parámetros de API
-            api_params = {
-                "image": image_tuple,
-                "prompt": prompt.strip()
-            }
-            
-            # Añadir parámetros opcionales si están soportados
-            try:
-                # Intentar con parámetros modernos
-                test_params = api_params.copy()
-                if quality in ["standard", "hd"]:
-                    test_params["quality"] = quality
-                if input_fidelity in ["low", "high"]:
-                    test_params["input_fidelity"] = input_fidelity
-                
-                logger.info(f"Intentando con parámetros: quality={quality}, input_fidelity={input_fidelity}")
-                response = client.images.edit(**test_params)
-                logger.info("✓ Respuesta recibida con parámetros avanzados")
-                
-            except Exception as modern_error:
-                # Si fallan los parámetros modernos, usar solo los básicos
-                error_str = str(modern_error).lower()
-                if "unexpected keyword argument" in error_str or "input_fidelity" in error_str or "quality" in error_str:
-                    logger.warning("⚠️ Parámetros avanzados no soportados, usando API básica...")
-                    
-                    # Solo usar parámetros básicos
-                    basic_params = {
-                        "image": image_tuple,
-                        "prompt": prompt.strip()
-                    }
-                    
-                    # Intentar añadir quality si está soportado
-                    try:
-                        if quality == "hd":
-                            basic_params["quality"] = "hd"
-                        response = client.images.edit(**basic_params)
-                        logger.info("✓ Respuesta recibida con API básica + quality")
-                    except Exception:
-                        # Última opción: solo imagen y prompt
-                        response = client.images.edit(
-                            image=image_tuple,
-                            prompt=prompt.strip()
-                        )
-                        logger.info("✓ Respuesta recibida con API básica")
-                else:
-                    # Error diferente, re-lanzar con manejo específico
-                    error_type = type(modern_error).__name__
-                    logger.error(f"✗ Error específico de OpenAI API ({error_type}): {str(modern_error)}")
-                    
-                    if "rate_limit" in error_str:
-                        logger.error("Solución: Espera un momento antes de volver a intentar")
-                        return (self.create_error_image(message="RATE LIMIT"),)
-                    elif "invalid_request" in error_str:
-                        logger.error("Solución: Verifica los parámetros de la solicitud")
-                        return (self.create_error_image(message="INVALID REQUEST"),)
-                    elif "authentication" in error_str:
-                        logger.error("Solución: Verifica tu API key de OpenAI")
-                        return (self.create_error_image(message="AUTH ERROR"),)
-                    elif "billing" in error_str:
-                        logger.error("Solución: Verifica tu saldo/plan de OpenAI")
-                        return (self.create_error_image(message="BILLING ERROR"),)
+            if api_method == "responses_api":
+                use_responses_api = True
+                logger.info("🔧 Forzando uso de Responses API")
+            elif api_method == "image_api":
+                use_responses_api = False
+                logger.info("🔧 Forzando uso de Image API")
+            else:  # auto
+                if input_fidelity == "high":
+                    if capabilities.get("responses_api_available", False):
+                        use_responses_api = True
+                        logger.info("🎯 Auto: Usando Responses API para input_fidelity='high'")
+                    elif capabilities.get("image_api_input_fidelity", False):
+                        use_responses_api = False
+                        logger.info("🎯 Auto: Usando Image API con soporte input_fidelity")
                     else:
-                        logger.error(f"Error no identificado: {modern_error}")
-                        return (self.create_error_image(message="API ERROR"),)
-                
-        except Exception as e:
-            logger.error(f"✗ Error preparando imagen para API: {e}")
-            logger.error(f"Tipo de error: {type(e).__name__}")
-            return (self.create_error_image(message="PREP ERROR"),)
-
-       # 5. Procesar respuesta
-        try:
-            # Validar que la respuesta tiene la estructura esperada
-            if not hasattr(response, 'data') or not response.data:
-                logger.error("Respuesta no tiene datos")
-                logger.error(f"Respuesta completa: {response}")
-                raise ValueError("Respuesta de API sin datos")
-            
-            if len(response.data) == 0:
-                logger.error("Lista de datos está vacía")
-                raise ValueError("Respuesta de API con lista vacía")
-            
-            # Examinar el primer elemento de datos
-            first_item = response.data[0]
-            logger.info(f"Estructura del primer item: {dir(first_item)}")
-            
-            # Intentar obtener los datos de imagen en diferentes formatos
-            img_data = None
-            
-            # Método 1: b64_json (más común)
-            if hasattr(first_item, 'b64_json') and first_item.b64_json:
-                logger.info("Usando b64_json")
-                b64_data = first_item.b64_json
-                img_data = base64.b64decode(b64_data)
-            
-            # Método 2: url (si la respuesta incluye URL)
-            elif hasattr(first_item, 'url') and first_item.url:
-                logger.info("Usando URL, descargando imagen...")
-                import requests
-                url_response = requests.get(first_item.url)
-                if url_response.status_code == 200:
-                    img_data = url_response.content
+                        use_responses_api = False
+                        logger.warning("⚠️ Auto: input_fidelity no disponible, usando Image API básica")
                 else:
-                    raise ValueError(f"Error descargando desde URL: {url_response.status_code}")
+                    use_responses_api = False
+                    logger.info("🎯 Auto: Usando Image API para input_fidelity='low'")
             
-            # Método 3: revised_prompt (a veces OpenAI devuelve esto)
-            elif hasattr(first_item, 'revised_prompt'):
-                logger.warning("Respuesta contiene revised_prompt pero no imagen")
-                logger.warning(f"Revised prompt: {first_item.revised_prompt}")
-                raise ValueError("Respuesta contiene prompt pero no imagen")
+        except Exception as e:
+            logger.error(f"✗ Error determinando API: {e}")
+            return (self.create_error_image(message="API SELECTION ERROR"),)
+
+        # 5. Preparar imagen y ejecutar
+        try:
+            image_tuple = self._prepare_image_for_api(combined_img, output_format)
             
-            # Método 4: Inspección completa de la respuesta
+            logger.info(f"⏳ Enviando a OpenAI {'Responses' if use_responses_api else 'Image'} API...")
+            
+            if use_responses_api:
+                response = self._call_responses_api(
+                    client, image_tuple, prompt, input_fidelity, quality, output_format
+                )
+                img_data = self._extract_image_from_responses_api(response)
             else:
-                logger.error("No se encontró formato de imagen conocido")
-                logger.error(f"Atributos disponibles: {[attr for attr in dir(first_item) if not attr.startswith('_')]}")
-                
-                # Intentar acceder a todos los atributos no privados
-                for attr in dir(first_item):
-                    if not attr.startswith('_'):
-                        try:
-                            value = getattr(first_item, attr)
-                            logger.error(f"  {attr}: {type(value)} = {str(value)[:100]}...")
-                        except Exception as e:
-                            logger.error(f"  {attr}: Error accediendo - {e}")
-                
-                raise ValueError("No se pudo extraer imagen de la respuesta")
+                response = self._call_image_api(
+                    client, image_tuple, prompt, input_fidelity, quality, output_format
+                )
+                img_data = self._extract_image_from_image_api(response)
             
-            if img_data is None:
-                raise ValueError("No se pudieron obtener datos de imagen")
+            logger.info("✅ Respuesta recibida y procesada")
             
-            # Crear imagen desde los datos
+        except Exception as e:
+            logger.error(f"✗ Error en llamada API: {e}")
+            return (self.create_error_image(message="API ERROR"),)
+
+        # 6. Procesar respuesta final
+        try:
             result_img = Image.open(io.BytesIO(img_data))
+            logger.info(f"📷 Imagen final: {result_img.mode}, {result_img.size}")
             
-            # OpenAI puede devolver la imagen en diferentes formatos
-            logger.info(f"Imagen recibida de OpenAI en formato: {result_img.mode}")
-            logger.info(f"Tamaño de imagen: {result_img.size}")
-            
-            # Convertir a tensor usando nuestra función corregida
             result_tensor = self.pil_to_tensor(result_img)
             
-            logger.info(f"✓ Imagen procesada exitosamente - Shape: {result_tensor.shape}, dtype: {result_tensor.dtype}")
+            logger.info(f"✅ Procesamiento completado - Tensor: {result_tensor.shape}, dtype: {result_tensor.dtype}")
             
         except Exception as e:
             logger.error(f"✗ Error procesando respuesta: {e}")
-            logger.error(f"Tipo de error: {type(e).__name__}")
-            
-            # Debug adicional: intentar serializar la respuesta
-            try:
-                import json
-                response_dict = response.model_dump() if hasattr(response, 'model_dump') else str(response)
-                logger.error(f"Respuesta completa: {json.dumps(response_dict, indent=2, default=str)[:500]}...")
-            except Exception as debug_error:
-                logger.error(f"Error en debug de respuesta: {debug_error}")
-                logger.error(f"Tipo de respuesta: {type(response)}")
-            
             return (self.create_error_image(message="RESPONSE ERROR"),)
-        # 6. Cleanup
+
+        # 7. Cleanup
         try:
             if 'combined_img' in locals():
                 combined_img.close()
@@ -677,7 +725,7 @@ class OpenAIImageEditNode:
         except Exception as e:
             logger.warning(f"Warning en cleanup: {e}")
 
-        logger.info("=== Ejecución completada exitosamente ===")
+        logger.info("=== ¡Ejecución con Dual API completada! ===")
         return (result_tensor,)
 
 # --- Endpoints web opcionales ---
@@ -688,13 +736,22 @@ try:
     @PromptServer.instance.routes.get("/openai_image_edit/status")
     async def get_status(request):
         """Endpoint para verificar estado del nodo."""
-        return web.json_response({
-            "status": "active",
-            "message": "OpenAI Image Edit Node funcionando",
-            "version": "2.1.0",
-            "config_loaded": os.path.exists(CONFIG_FILE),
-            "api_key_configured": os.path.exists(API_KEY_FILE)
-        })
+        try:
+            import openai
+            return web.json_response({
+                "status": "active",
+                "message": "OpenAI Image Edit Node (Dual API) funcionando",
+                "version": "4.0.0-dual_api",
+                "openai_version": openai.__version__,
+                "supports_dual_api": True,
+                "config_loaded": os.path.exists(CONFIG_FILE),
+                "api_key_configured": os.path.exists(API_KEY_FILE)
+            })
+        except Exception as e:
+            return web.json_response({
+                "status": "error",
+                "message": str(e)
+            }, status=500)
         
 except ImportError:
     logger.info("Endpoints web no disponibles (normal en algunos entornos)")
@@ -705,5 +762,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "OpenAIImageEditNode": "OpenAI Image Edit",
+    "OpenAIImageEditNode": "OpenAI Image Edit (Dual API + High Fidelity)",
 }
