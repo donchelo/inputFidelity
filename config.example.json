@@ -1,0 +1,15 @@
+{
+    "default_quality": "high",
+    "default_fidelity": "high",
+    "default_output_format": "png",
+    "max_image_size": 2048,
+    "timeout": 60,
+    "cache_enabled": true,
+    "max_cache_size": 10,
+    "error_image_color": [255, 0, 0],
+    "combine_background_color": [255, 255, 255],
+    "log_level": "INFO",
+    "enable_debug_mode": false,
+    "auto_resize_images": true,
+    "preserve_metadata": true
+} 

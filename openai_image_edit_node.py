@@ -61,7 +61,7 @@ class OpenAIImageEditNode:
         return {
             "required": {
                 "image_1": ("IMAGE", {
-                    "tooltip": "Imagen principal a editar (preserva máximo detalle)"
+                    "tooltip": "Imagen principal a editar (preserva máximo detalle con input_fidelity='high')"
                 }),
                 "prompt": ("STRING", {
                     "multiline": True, 
@@ -70,6 +70,9 @@ class OpenAIImageEditNode:
                 }),
             },
             "optional": {
+                "image_2": ("IMAGE", {
+                    "tooltip": "Segunda imagen (opcional) - Útil para combinar elementos según docs oficiales"
+                }),
                 "api_key": ("STRING", {
                     "default": "", 
                     "multiline": False,
@@ -79,7 +82,7 @@ class OpenAIImageEditNode:
                     "default": "high",
                     "tooltip": "CRÍTICO: 'high' preserva detalles de caras, logos y texturas según docs oficiales"
                 }),
-                "quality": (["standard", "high"], {  # Corregido: valores válidos según API
+                "quality": (["standard", "high"], {
                     "default": "high",
                     "tooltip": "Calidad de imagen: 'high' para mejor resolución"
                 }),
@@ -101,6 +104,10 @@ class OpenAIImageEditNode:
                 "force_update_client": ("BOOLEAN", {
                     "default": False,
                     "tooltip": "Forzar actualización del cliente OpenAI"
+                }),
+                "combine_images": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Combinar imágenes horizontalmente (útil para múltiples elementos)"
                 }),
             }
         }
@@ -290,6 +297,42 @@ class OpenAIImageEditNode:
                 logger.error(f"PIL Image mode: {img.mode}, size: {img.size}")
             raise
 
+    @staticmethod
+    def combine_images_horizontal(img1: Image.Image, img2: Image.Image, 
+                                bg_color: tuple = (255, 255, 255)) -> Image.Image:
+        """
+        Combina dos imágenes horizontalmente según el patrón de la documentación oficial.
+        Útil para preservar detalles de múltiples elementos con input_fidelity='high'.
+        """
+        try:
+            # Asegurar formato RGBA para manejo seguro de transparencias
+            left = img1.convert("RGBA")
+            right = img2.convert("RGBA")
+
+            # Redimensionar derecha para coincidir con altura de izquierda
+            target_h = left.height
+            scale = target_h / float(right.height)
+            target_w = int(round(right.width * scale))
+            right = right.resize((target_w, target_h), Image.LANCZOS)
+
+            # Crear nuevo canvas
+            total_w = left.width + right.width
+            canvas = Image.new("RGBA", (total_w, target_h), bg_color + (255,))
+
+            # Pegar imágenes
+            canvas.paste(left, (0, 0), left)
+            canvas.paste(right, (left.width, 0), right)
+
+            # Convertir de vuelta a RGB para API
+            result = canvas.convert("RGB")
+            
+            logger.info(f"Imágenes combinadas: {left.size} + {right.size} = {result.size}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error combinando imágenes: {e}")
+            return img1  # Retornar imagen original si falla
+
 
     def _resize_image_if_needed(self, img: Image.Image, max_size: int) -> Image.Image:
         """Redimensiona imagen si excede el tamaño máximo, preservando el formato."""
@@ -447,13 +490,15 @@ class OpenAIImageEditNode:
     def execute(self,
                 image_1: torch.Tensor,
                 prompt: str,
+                image_2: Optional[torch.Tensor] = None,
                 api_key: Optional[str] = None,
                 input_fidelity: str = "high",
                 quality: str = "high",
                 output_format: str = "png",
                 max_size: int = 1024,
                 enable_cache: bool = True,
-                force_update_client: bool = False
+                force_update_client: bool = False,
+                combine_images: bool = False
                 ) -> Tuple[torch.Tensor]:
         """
         Ejecuta la edición de imagen usando gpt-image-1 con input_fidelity='high'.
@@ -480,7 +525,23 @@ class OpenAIImageEditNode:
             # Convertir imagen principal (preserva máximo detalle con input_fidelity='high')
             input_img = self.tensor_to_pil(image_1)
             input_img = self._resize_image_if_needed(input_img, max_size)
-            logger.info("✓ Imagen procesada para input_fidelity='high'")
+            logger.info("✓ Imagen principal procesada para input_fidelity='high'")
+            
+            # Procesar segunda imagen si está disponible
+            if image_2 is not None and combine_images:
+                try:
+                    img2 = self.tensor_to_pil(image_2)
+                    img2 = self._resize_image_if_needed(img2, max_size)
+                    
+                    # Combinar imágenes horizontalmente según documentación oficial
+                    input_img = self.combine_images_horizontal(input_img, img2)
+                    logger.info("✓ Imágenes combinadas horizontalmente según patrón oficial")
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Error combinando imágenes: {e}, usando solo imagen principal")
+                    
+            elif image_2 is not None and not combine_images:
+                logger.info("ℹ️ Segunda imagen proporcionada pero combine_images=False, usando solo imagen principal")
                 
         except Exception as e:
             logger.error(f"✗ Error procesando imagen: {e}")
@@ -560,26 +621,39 @@ class OpenAIImageEditNode:
         return (result_tensor,)
 
 # --- Endpoints web opcionales ---
-try:
-    from aiohttp import web
-    from server import PromptServer
-
-    @PromptServer.instance.routes.get("/openai_image_edit/status")
-    async def get_status(request):
-        """Endpoint para verificar estado del nodo."""
-        import openai
-        return web.json_response({
-            "status": "active",
-            "message": "OpenAI Image Edit Node con input_fidelity funcionando",
-            "version": "3.0.0-input_fidelity",
-            "openai_version": openai.__version__,
-            "supports_input_fidelity": True,
-            "config_loaded": os.path.exists(CONFIG_FILE),
-            "api_key_configured": os.path.exists(API_KEY_FILE)
-        })
+# Estos endpoints solo están disponibles cuando ComfyUI está ejecutándose
+def setup_web_endpoints():
+    """Configura endpoints web si ComfyUI está disponible."""
+    try:
+        from aiohttp import web
+        from server import PromptServer
         
-except ImportError:
-    logger.info("Endpoints web no disponibles (normal en algunos entornos)")
+        @PromptServer.instance.routes.get("/openai_image_edit/status")
+        async def get_status(request):
+            """Endpoint para verificar estado del nodo."""
+            import openai
+            return web.json_response({
+                "status": "active",
+                "message": "OpenAI Image Edit Node con input_fidelity funcionando",
+                "version": "3.0.0-input_fidelity",
+                "openai_version": openai.__version__,
+                "supports_input_fidelity": True,
+                "config_loaded": os.path.exists(CONFIG_FILE),
+                "api_key_configured": os.path.exists(API_KEY_FILE)
+            })
+        
+        logger.info("Endpoints web configurados exitosamente")
+        return True
+        
+    except ImportError as e:
+        logger.debug(f"Endpoints web no disponibles: {e} (normal durante desarrollo)")
+        return False
+    except Exception as e:
+        logger.warning(f"Error configurando endpoints web: {e}")
+        return False
+
+# Intentar configurar endpoints al importar el módulo
+_web_endpoints_configured = setup_web_endpoints()
 
 # --- Exportación de nodos para ComfyUI ---
 NODE_CLASS_MAPPINGS = {
