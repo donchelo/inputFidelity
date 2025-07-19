@@ -1,151 +1,182 @@
-# OpenAI Image Edit Node para ComfyUI
+# OpenAI Image Fidelity Fashion Node para ComfyUI
 
-Un nodo personalizado para ComfyUI que permite editar imágenes usando la API de OpenAI con soporte completo para `input_fidelity="high"` para preservar detalles de caras, logos y texturas.
+## 📋 Descripción
+Este nodo personalizado permite usar la funcionalidad de High Input Fidelity de OpenAI Image 1 directamente en ComfyUI, específicamente optimizado para casos de uso de moda y fotografía de productos.
 
-## 🚀 Instalación
+## 🚀 Características Principales
+- **Alta Fidelidad de Entrada**: Preserva detalles finos como texturas, patrones y logos
+- **Presets de Moda**: Configuraciones predefinidas para casos comunes
+- **Soporte Multi-imagen**: Combina múltiples imágenes de referencia
+- **Máscara Opcional**: Para ediciones precisas de áreas específicas
+- **Fondos Transparentes**: Para fotografía de productos
 
-### Método 1: ComfyUI Manager (Recomendado)
-1. Abre ComfyUI Manager
-2. Busca "OpenAI Image Edit Node"
-3. Haz clic en "Install"
-4. Reinicia ComfyUI
+## 📦 Instalación
 
-### Método 2: Instalación Manual
-1. Copia esta carpeta a `custom_nodes/` de tu instalación de ComfyUI
-2. Instala las dependencias:
+### Método 1: Manual (Recomendado)
+
+1. **Navega a la carpeta de custom nodes de ComfyUI:**
    ```bash
-   # Para ComfyUI Portable:
-   python_embeded\python.exe -m pip install -r requirements.txt
+   cd ComfyUI/custom_nodes/
+   ```
+
+2. **Copia esta carpeta completa:**
+   Copia la carpeta `inputFidelity` a `ComfyUI/custom_nodes/`
+
+3. **Instala las dependencias:**
    
-   # Para ComfyUI Desktop:
+   **Para ComfyUI Portable:**
+   ```bash
+   # Desde el directorio ComfyUI_windows_portable
+   python_embeded\python.exe -m pip install -r custom_nodes\inputFidelity\requirements.txt
+   ```
+   
+   **Para ComfyUI Desktop/Custom Python:**
+   ```bash
+   cd ComfyUI/custom_nodes/inputFidelity
    pip install -r requirements.txt
    ```
-3. Reinicia ComfyUI
 
-## 📋 Dependencias
+4. **Configura tu API Key de OpenAI:**
+   
+   **Opción A - Variable de entorno (Recomendado):**
+   ```bash
+   # Windows
+   set OPENAI_API_KEY=tu_api_key_aqui
+   
+   # Linux/Mac
+   export OPENAI_API_KEY=tu_api_key_aqui
+   ```
+   
+   **Opción B - En el nodo directamente:**
+   Introduce tu API key en el campo "api_key" del nodo
 
-- `openai>=1.100.0` - Cliente oficial de OpenAI
-- `pillow>=8.0.0` - Procesamiento de imágenes
-- `torch>=1.13.0` - Tensores de PyTorch
-- `numpy>=1.21.0` - Operaciones numéricas
-- `requests>=2.25.0` - Peticiones HTTP
+5. **Reinicia ComfyUI**
 
-## 🎯 Uso
+### Método 2: Via ComfyUI Manager
+1. Abre ComfyUI Manager
+2. Busca "OpenAI Image Fidelity Fashion"
+3. Instala y reinicia ComfyUI
 
-### Inputs Requeridos:
-- **`image_1`**: Imagen principal a editar (tensor ComfyUI)
-- **`prompt`**: Descripción detallada de la edición deseada
+## 🎯 Casos de Uso Especializados
 
-### Inputs Opcionales:
-- **`image_2`**: Segunda imagen (tensor ComfyUI) - Útil para combinar elementos
-- **`api_key`**: Tu clave de OpenAI (opcional si tienes la variable de entorno)
-- **`input_fidelity`**: "low" o "high" (por defecto: "high") - **CRÍTICO** para preservar detalles
-- **`quality`**: "standard" o "high" (por defecto: "high")
-- **`output_format`**: "png", "jpeg", "webp" (por defecto: "png")
-- **`max_size`**: Tamaño máximo en píxeles (256-2048, por defecto: 1024)
-- **`enable_cache`**: Habilitar cache para mejorar rendimiento
-- **`force_update_client`**: Forzar actualización del cliente OpenAI
-- **`combine_images`**: Combinar imágenes horizontalmente (útil para múltiples elementos)
+### 1. **Variación de Outfit**
+- Cambia colores, estilos o piezas de ropa
+- Preserva pose, rostro y proporciones del modelo
+- Mantiene texturas y iluminación realista
 
-### Output:
-- **`edited_image`**: Imagen editada (tensor ComfyUI)
+### 2. **Adición de Accesorios**
+- Añade bolsos, joyas, sombreros, etc.
+- Mantiene la pose y detalles originales
+- Iluminación coherente con la imagen original
 
-## ⚙️ Configuración
+### 3. **Extracción de Producto**
+- Extrae prendas a fondos limpios
+- Ideal para catálogos de e-commerce
+- Preserva todos los detalles del producto
 
-### API Key
-Puedes configurar tu API key de OpenAI de tres formas:
-1. **Variable de entorno**: `OPENAI_API_KEY`
-2. **Archivo seguro**: Se guarda automáticamente en `openai_api_key.txt`
-3. **Input del nodo**: Proporcionar directamente en el nodo
+### 4. **Cambio de Color**
+- Modifica solo el color de prendas específicas
+- Mantiene texturas, patrones y detalles
+- Conserva la composición general
 
-### Archivo de Configuración
-El nodo crea automáticamente un archivo `config.json` con configuraciones personalizables:
-```json
-{
-    "default_quality": "high",
-    "default_fidelity": "high",
-    "default_output_format": "png",
-    "max_image_size": 2048,
-    "timeout": 60,
-    "cache_enabled": true,
-    "max_cache_size": 10
-}
+### 5. **Transferencia de Estilo**
+- Transforma el estilo de la ropa
+- Preserva características del modelo
+- Mantiene la coherencia visual
+
+### 6. **Cambio de Fondo**
+- Solo modifica el fondo
+- Preserva modelo, outfit y pose exactamente
+- Mantiene la iluminación original
+
+## ⚙️ Parámetros del Nodo
+
+### Parámetros Requeridos:
+- **prompt**: Descripción de la edición deseada
+- **primary_image**: Imagen principal a editar
+- **input_fidelity**: "high" (recomendado) o "low"
+- **quality**: "auto", "low", "medium", "high"
+- **size**: "auto", "1024x1024", "1024x1536", "1536x1024"
+- **output_format**: "png", "jpeg", "webp"
+- **background**: "auto", "opaque", "transparent"
+- **fashion_preset**: Preset especializado o "custom"
+
+### Parámetros Opcionales:
+- **reference_image**: Imagen de referencia adicional
+- **mask_image**: Máscara para ediciones precisas
+- **api_key**: API key de OpenAI (si no está en variables de entorno)
+
+## 💡 Consejos de Uso
+
+### Para Mejores Resultados:
+1. **Usa "high" input fidelity** para preservar detalles importantes
+2. **La primera imagen** siempre tiene la máxima preservación de detalles
+3. **Coloca rostros en la primera imagen** cuando uses múltiples imágenes
+4. **Usa prompts específicos** sobre qué mantener y qué cambiar
+5. **Quality "high"** es recomendado para fotografía de moda
+
+### Ejemplos de Prompts Efectivos:
+```
+"Change the dress to emerald green while preserving all fabric textures and the model's pose"
+
+"Add gold jewelry including earrings and necklace while maintaining the original lighting"
+
+"Extract this exact jacket and place it on a pure white background for catalog use"
+
+"Change only the shirt color to navy blue, keeping all other elements unchanged"
 ```
 
-## 🔧 Características Avanzadas
+## 🔧 Resolución de Problemas
 
-### Sistema de Cache
-- Cache automático para mejorar rendimiento
-- Configurable desde el archivo de configuración
-- Limpieza automática cuando se excede el tamaño máximo
+### Error: "OpenAI client not initialized"
+- Verifica que tu API key esté configurada correctamente
+- Asegúrate de tener créditos disponibles en tu cuenta de OpenAI
 
-### Manejo de Errores
-- Imágenes de error informativas
-- Logging detallado para debugging
-- Validación de inputs y API responses
+### Error: "No data received from OpenAI API"
+- Verifica tu conexión a internet
+- Comprueba el status de la API de OpenAI
+- Revisa que tu prompt no viole las políticas de contenido
 
-### Soporte para Diferentes Formatos
-- PNG (recomendado para transparencias)
-- JPEG (compresión)
-- WebP (formato moderno)
+### Calidad Baja en Resultados:
+- Usa `input_fidelity="high"`
+- Incrementa `quality` a "high"
+- Asegúrate de que las imágenes de entrada tengan buena resolución
 
-## 🐛 Solución de Problemas
+### Dependencias Faltantes:
+```bash
+# Reinstala las dependencias
+pip install --upgrade openai pillow torch numpy
+```
 
-### Error: "API key not found"
-1. Verifica que tu API key sea válida
-2. Asegúrate de que tenga permisos para la API de edición de imágenes
-3. Revisa que el formato sea correcto (debe empezar con `sk-`)
+## 📊 Costos y Consideraciones
 
-### Error: "Input fidelity not supported"
-1. Actualiza la biblioteca OpenAI: `pip install --upgrade openai`
-2. Verifica que tu versión de OpenAI sea >= 1.100.0
+- **Input Fidelity "high"** consume más tokens que "low"
+- **La primera imagen** en multi-imagen consume más tokens
+- **Quality "high"** genera más tokens de salida
+- Revisa la [página de precios de OpenAI](https://openai.com/pricing) para costos actuales
 
-### Error: "Image too large"
-1. Reduce el valor de `max_size`
-2. ComfyUI redimensionará automáticamente la imagen si es necesario
+## 🎯 Presets de Moda Disponibles
 
-## 📝 Notas Importantes
+1. **outfit_variation**: Para cambiar prendas completas
+2. **accessory_addition**: Para añadir accesorios
+3. **product_extraction**: Para extraer productos a fondos limpios
+4. **color_change**: Para cambios de color específicos
+5. **style_transfer**: Para transferir estilos entre prendas
+6. **background_change**: Para cambiar solo el fondo
+7. **custom**: Para prompts personalizados
 
-- **input_fidelity="high"**: Preserva detalles de caras, logos y texturas según la documentación oficial de OpenAI
-- **Cache**: Se recomienda mantener habilitado para mejor rendimiento
-- **Formato PNG**: Recomendado para mantener transparencias
-- **Tamaño máximo**: 2048x2048 píxeles según limitaciones de la API
+## 🤝 Contribuciones
 
-## 🎨 Ejemplos de Uso (Basados en Documentación Oficial)
-
-### Edición Precisa
-- **Cambio de elementos**: Cambiar el color de objetos específicos sin afectar el resto
-- **Eliminación de elementos**: Remover objetos de forma limpia
-- **Adición de elementos**: Insertar nuevos objetos de forma natural
-
-### Preservación de Caras
-- **Edición de fotos**: Editar fotos manteniendo rasgos faciales
-- **Personalización**: Crear avatares que mantengan la identidad
-- **Combinación de caras**: Fusionar caras de múltiples fotos
-
-### Consistencia de Marca
-- **Assets de marketing**: Generar banners con logos sin distorsión
-- **Mockups**: Colocar logos en escenas realistas
-- **Fotografía de productos**: Cambiar fondos manteniendo detalles del producto
-
-### Retoque de Moda y Productos
-- **Variaciones de outfit**: Cambiar colores o estilos de ropa
-- **Adición de accesorios**: Agregar joyas, sombreros, etc.
-- **Extracción de productos**: Mostrar productos en nuevos entornos
-
-## 🤝 Contribuir
-
-Si encuentras bugs o tienes sugerencias, por favor:
-1. Abre un issue en GitHub
-2. Incluye logs detallados del error
-3. Describe los pasos para reproducir el problema
+Si encuentras bugs o tienes sugerencias de mejora, por favor crea un issue o pull request en el repositorio del proyecto.
 
 ## 📄 Licencia
 
-Este proyecto está bajo la licencia MIT. Ver archivo LICENSE para más detalles.
+Este proyecto está bajo la licencia MIT. Consulta el archivo LICENSE para más detalles.
 
-## 🙏 Agradecimientos
+## 📞 Soporte
 
-- ComfyUI por el framework
-- OpenAI por la API de edición de imágenes
-- La comunidad de ComfyUI por el soporte 
+Para problemas específicos o preguntas:
+1. Revisa esta documentación
+2. Verifica que todas las dependencias estén instaladas
+3. Confirma que tu API key de OpenAI es válida
+4. Prueba con imágenes de menor resolución si hay problemas de memoria
