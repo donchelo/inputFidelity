@@ -146,22 +146,21 @@ class OpenAIImageFidelityFashion:
                     "outfit_variation", 
                     "accessory_addition",
                     "product_extraction",
+                    "product_photography",
                     "color_change",
                     "style_transfer",
                     "background_change"
                 ], {"default": "custom"}),
                 "api_method": (["images_api", "responses_api"], {"default": "images_api"}),
-                
-                # NUEVO: Control de iteraciones
-                "enable_iterations_control": ("BOOLEAN", {"default": True}),
             },
+
             "optional": {
                 "reference_image": ("IMAGE",),
                 "mask_image": ("IMAGE",),
             }
         }
     
-    # NUEVO: Agregar remaining_iterations a las salidas
+    # Return types for ComfyUI
     RETURN_TYPES = ("IMAGE", "STRING", "STRING", "INT")
     RETURN_NAMES = ("image", "revised_prompt", "debug_info", "remaining_iterations")
     FUNCTION = "generate_fashion_image"
@@ -220,6 +219,7 @@ class OpenAIImageFidelityFashion:
             "outfit_variation": "Change the outfit while preserving the model's pose, facial features, and body proportions. Maintain fabric textures and realistic lighting.",
             "accessory_addition": "Add the accessory to the outfit while maintaining the original pose, lighting, and all existing details of the clothing and model.",
             "product_extraction": "Extract this exact product/garment and place it on a clean, professional background while preserving all details, textures, and colors.",
+            "product_photography": "Convert this garment into a professional product photography shot with a light gray background. Present the garment as a clean, centered product photo with professional studio lighting, removing any model or person, showing only the clothing item in perfect condition with natural shadows and high-end e-commerce styling.",
             "color_change": "Change only the color of the specified garment while preserving all textures, patterns, fabric details, and the overall composition.",
             "style_transfer": "Transform the clothing style while maintaining the model's pose, facial features, and the overall composition of the image.",
             "background_change": "Change only the background while preserving the model, outfit, pose, lighting, and all clothing details exactly as they are."
@@ -380,29 +380,15 @@ class OpenAIImageFidelityFashion:
             raise Exception("No output received from Responses API")
     
     # MODIFICADO: Añadir parámetros para control de iteraciones
-    def generate_fashion_image(
-    self,
-    prompt,
-    primary_image,
-    input_fidelity="high",
-    quality="high",
-    size="auto",
-    output_format="png",
-    background="auto",
-    fashion_preset="custom",
-    api_method="images_api",
-    enable_iterations_control=True,
-    reference_image=None,
-    mask_image=None
-):
-
-        
+    def generate_fashion_image(self, prompt, primary_image, input_fidelity, quality, size,
+                           output_format, background, fashion_preset, api_method,
+                           reference_image=None, mask_image=None):
+        enable_iterations_control = True  # Always active
         debug_info = []
-        remaining_iterations = 0  # NUEVO: Variable para tracking
+        remaining_iterations = 0
         
-        # NUEVO: CONTROL DE ITERACIONES - LA PARTE CLAVE
+        # ITERATION CONTROL - Always active
         if enable_iterations_control:
-            # Usar credenciales del nodo o del config.env
             airtable_key = os.getenv('AIRTABLE_API_KEY', '')
             airtable_base = os.getenv('AIRTABLE_BASE_ID', '')
             
@@ -423,18 +409,13 @@ class OpenAIImageFidelityFashion:
         else:
             debug_info.append("⚠️ Control de iteraciones deshabilitado")
         
-        # RESTO DEL CÓDIGO ORIGINAL (sin cambios)
-        # Use provided API key or environment variable
-       
+        # Initialize OpenAI client
         if not self.client:
             error_msg = "OpenAI client not initialized. Please set OPENAI_API_KEY in config.env"
             return (primary_image, f"Error: {error_msg}", error_msg, remaining_iterations)
 
         client = self.client
         debug_info.append("Using environment API key from config.env")
-
-
-
         
         try:
             # Get optimized prompt for fashion use case
@@ -474,7 +455,7 @@ class OpenAIImageFidelityFashion:
             debug_info.append("Success: Image generated successfully")
             debug_str = " | ".join(debug_info)
             
-            # MODIFICADO: Retornar también remaining_iterations
+            # Return successful result with remaining_iterations
             return (result_tensor, revised_prompt, debug_str, remaining_iterations)
                 
         except Exception as e:
@@ -483,10 +464,10 @@ class OpenAIImageFidelityFashion:
             debug_str = " | ".join(debug_info)
             print(error_msg)
             
-            # MODIFICADO: Return también remaining_iterations
+            # Return error with remaining_iterations
             return (primary_image, f"Error: {str(e)}", debug_str, remaining_iterations)
 
-# Node registration for ComfyUI (sin cambios)
+# Node registration for ComfyUI
 NODE_CLASS_MAPPINGS = {
     "OpenAIImageFidelityFashion": OpenAIImageFidelityFashion
 }
