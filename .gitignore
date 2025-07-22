@@ -1,0 +1,34 @@
+# Evita subir archivos de configuración sensibles
+config.env
+
+# Evita subir claves o backups personales
+*.key
+*.pem
+*.bak
+
+# Bytecode de Python
+__pycache__/
+*.py[cod]
+
+# Entornos virtuales
+venv/
+.env/
+.venv/
+
+# Archivos de log
+*.log
+
+# Archivos de sistema
+.DS_Store
+Thumbs.db
+
+# Carpeta de pruebas o salidas
+/output/
+*.tmp
+
+# IDEs y editores
+.vscode/
+.idea/
+
+# Archivos de ComfyUI que no quieres versionar
+comfyui_config.env
