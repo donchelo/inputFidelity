@@ -158,11 +158,6 @@ class OpenAIImageFidelityFashion:
             "optional": {
                 "reference_image": ("IMAGE",),
                 "mask_image": ("IMAGE",),
-                "api_key": ("STRING", {"default": ""}),
-                
-                # NUEVO: Credenciales Airtable opcionales
-                "airtable_api_key": ("STRING", {"default": ""}),
-                "airtable_base_id": ("STRING", {"default": ""}),
             }
         }
     
@@ -385,12 +380,22 @@ class OpenAIImageFidelityFashion:
             raise Exception("No output received from Responses API")
     
     # MODIFICADO: Añadir parámetros para control de iteraciones
-    def generate_fashion_image(self, prompt, primary_image, input_fidelity="high", 
-                              quality="high", size="auto", output_format="png", 
-                              background="auto", fashion_preset="custom", 
-                              api_method="images_api", enable_iterations_control=True,
-                              reference_image=None, mask_image=None, api_key="",
-                              airtable_api_key="", airtable_base_id=""):
+    def generate_fashion_image(
+    self,
+    prompt,
+    primary_image,
+    input_fidelity="high",
+    quality="high",
+    size="auto",
+    output_format="png",
+    background="auto",
+    fashion_preset="custom",
+    api_method="images_api",
+    enable_iterations_control=True,
+    reference_image=None,
+    mask_image=None
+):
+
         
         debug_info = []
         remaining_iterations = 0  # NUEVO: Variable para tracking
@@ -398,8 +403,8 @@ class OpenAIImageFidelityFashion:
         # NUEVO: CONTROL DE ITERACIONES - LA PARTE CLAVE
         if enable_iterations_control:
             # Usar credenciales del nodo o del config.env
-            airtable_key = airtable_api_key.strip() or os.getenv('AIRTABLE_API_KEY', '')
-            airtable_base = airtable_base_id.strip() or os.getenv('AIRTABLE_BASE_ID', '')
+            airtable_key = os.getenv('AIRTABLE_API_KEY', '')
+            airtable_base = os.getenv('AIRTABLE_BASE_ID', '')
             
             if not airtable_key or not airtable_base:
                 error_msg = "❌ Se requieren credenciales de Airtable para control de iteraciones"
@@ -420,18 +425,16 @@ class OpenAIImageFidelityFashion:
         
         # RESTO DEL CÓDIGO ORIGINAL (sin cambios)
         # Use provided API key or environment variable
-        if api_key.strip():
-            try:
-                client = OpenAI(api_key=api_key.strip())
-                debug_info.append("Using provided API key")
-            except Exception as e:
-                return (primary_image, f"Error: {str(e)}", f"API key error: {str(e)}", remaining_iterations)
-        else:
-            if not self.client:
-                error_msg = "OpenAI client not initialized. Please set OPENAI_API_KEY environment variable or provide API key."
-                return (primary_image, f"Error: {error_msg}", error_msg, remaining_iterations)
-            client = self.client
-            debug_info.append("Using environment API key")
+       
+        if not self.client:
+            error_msg = "OpenAI client not initialized. Please set OPENAI_API_KEY in config.env"
+            return (primary_image, f"Error: {error_msg}", error_msg, remaining_iterations)
+
+        client = self.client
+        debug_info.append("Using environment API key from config.env")
+
+
+
         
         try:
             # Get optimized prompt for fashion use case
