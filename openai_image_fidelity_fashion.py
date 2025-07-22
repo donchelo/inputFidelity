@@ -52,6 +52,7 @@ class OpenAIImageFidelityFashion:
                     "style_transfer",
                     "background_change"
                 ], {"default": "custom"}),
+                "api_method": (["images_api", "responses_api"], {"default": "images_api"}),
             },
             "optional": {
                 "reference_image": ("IMAGE",),
@@ -60,8 +61,8 @@ class OpenAIImageFidelityFashion:
             }
         }
     
-    RETURN_TYPES = ("IMAGE", "STRING")
-    RETURN_NAMES = ("image", "revised_prompt")
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING")
+    RETURN_NAMES = ("image", "revised_prompt", "debug_info")
     FUNCTION = "generate_fashion_image"
     CATEGORY = "OpenAI/Fashion"
     
@@ -129,120 +130,224 @@ class OpenAIImageFidelityFashion:
             base_prompt = fashion_prompts.get(preset, custom_prompt)
             return f"{base_prompt}. {custom_prompt}" if custom_prompt.strip() else base_prompt
     
-    def prepare_images_for_api(self, primary_image, reference_image=None, mask_image=None):
-        """Prepare images for OpenAI API call"""
-        images = []
-        
-        # Convert primary image
-        primary_pil = self.tensor_to_pil(primary_image)
-        primary_base64 = self.pil_to_base64(primary_pil, "PNG")
-        images.append(f"data:image/png;base64,{primary_base64}")
-        
-        # Add reference image if provided
-        if reference_image is not None:
-            ref_pil = self.tensor_to_pil(reference_image)
-            ref_base64 = self.pil_to_base64(ref_pil, "PNG")
-            images.append(f"data:image/png;base64,{ref_base64}")
-        
-        return images, mask_image
+    def edit_with_images_api(self, client, primary_image, mask_image, prompt, 
+                           input_fidelity, quality, size, output_format, background):
+        """Edit using OpenAI Images API - for single image editing"""
+        try:
+            # Convert primary image to buffer
+            primary_pil = self.tensor_to_pil(primary_image)
+            image_buffer = io.BytesIO()
+            primary_pil.save(image_buffer, format="PNG")
+            image_buffer.seek(0)
+            
+            # Prepare API parameters
+            params = {
+                "model": "gpt-image-1",
+                "image": image_buffer,
+                "prompt": prompt,
+                "size": size,
+                "quality": quality,
+                "response_format": "b64_json"
+            }
+            
+            # Add input_fidelity parameter
+            if input_fidelity == "high":
+                params["input_fidelity"] = "high"
+            
+            # Add output format if not auto
+            if output_format != "auto":
+                params["output_format"] = output_format
+                
+            # Add background if not auto
+            if background != "auto":
+                params["background"] = background
+            
+            # Add mask if provided
+            if mask_image is not None:
+                mask_pil = self.tensor_to_pil(mask_image)
+                mask_buffer = io.BytesIO()
+                mask_pil.save(mask_buffer, format="PNG")
+                mask_buffer.seek(0)
+                params["mask"] = mask_buffer
+            
+            # Make API call
+            response = client.images.edit(**params)
+            
+            return response, "images_api"
+            
+        except Exception as e:
+            raise Exception(f"Images API error: {str(e)}")
+    
+    def edit_with_responses_api(self, client, primary_image, reference_image, prompt,
+                              input_fidelity, quality, size, output_format, background):
+        """Edit using OpenAI Responses API - for multi-image scenarios"""
+        try:
+            # Prepare content array
+            content = [
+                {"type": "input_text", "text": prompt}
+            ]
+            
+            # Add primary image
+            primary_pil = self.tensor_to_pil(primary_image)
+            primary_base64 = self.pil_to_base64(primary_pil, "PNG")
+            content.append({
+                "type": "input_image",
+                "image_url": f"data:image/png;base64,{primary_base64}"
+            })
+            
+            # Add reference image if provided
+            if reference_image is not None:
+                ref_pil = self.tensor_to_pil(reference_image)
+                ref_base64 = self.pil_to_base64(ref_pil, "PNG")
+                content.append({
+                    "type": "input_image",
+                    "image_url": f"data:image/png;base64,{ref_base64}"
+                })
+            
+            # Prepare tool parameters
+            tool_params = {"type": "image_generation"}
+            
+            if input_fidelity == "high":
+                tool_params["input_fidelity"] = "high"
+            if quality != "auto":
+                tool_params["quality"] = quality
+            if size != "auto":
+                tool_params["size"] = size
+            if output_format != "auto":
+                tool_params["output_format"] = output_format
+            if background != "auto":
+                tool_params["background"] = background
+            
+            # Make API call
+            response = client.responses.create(
+                model="gpt-4.1",
+                input=[{
+                    "role": "user",
+                    "content": content
+                }],
+                tools=[tool_params]
+            )
+            
+            return response, "responses_api"
+            
+        except Exception as e:
+            raise Exception(f"Responses API error: {str(e)}")
+    
+    def process_images_api_response(self, response):
+        """Process response from Images API"""
+        if hasattr(response, 'data') and len(response.data) > 0:
+            result_data = response.data[0]
+            
+            # Get image data
+            if hasattr(result_data, 'b64_json'):
+                image_base64 = result_data.b64_json
+            else:
+                raise Exception("No image data in Images API response")
+            
+            # Get revised prompt if available
+            revised_prompt = getattr(result_data, 'revised_prompt', "N/A (Images API)")
+            
+            return image_base64, revised_prompt
+        else:
+            raise Exception("No data received from Images API")
+    
+    def process_responses_api_response(self, response):
+        """Process response from Responses API"""
+        if hasattr(response, 'output') and response.output:
+            # Find image generation calls
+            image_data = [
+                output.result
+                for output in response.output
+                if hasattr(output, 'type') and output.type == "image_generation_call"
+            ]
+            
+            if image_data:
+                image_base64 = image_data[0]
+                
+                # Try to get revised prompt
+                revised_prompt = "Generated via Responses API"
+                for output in response.output:
+                    if hasattr(output, 'type') and output.type == "image_generation_call":
+                        if hasattr(output, 'revised_prompt'):
+                            revised_prompt = output.revised_prompt
+                        break
+                
+                return image_base64, revised_prompt
+            else:
+                raise Exception("No image generation calls found in Responses API response")
+        else:
+            raise Exception("No output received from Responses API")
     
     def generate_fashion_image(self, prompt, primary_image, input_fidelity="high", 
                               quality="high", size="auto", output_format="png", 
                               background="auto", fashion_preset="custom", 
-                              reference_image=None, mask_image=None, api_key=""):
+                              api_method="images_api", reference_image=None, 
+                              mask_image=None, api_key=""):
+        
+        debug_info = []
         
         # Use provided API key or environment variable
         if api_key.strip():
             try:
                 client = OpenAI(api_key=api_key.strip())
+                debug_info.append("Using provided API key")
             except Exception as e:
-                raise Exception(f"Error with provided API key: {e}")
+                return (primary_image, f"Error: {str(e)}", f"API key error: {str(e)}")
         else:
             if not self.client:
-                raise Exception("OpenAI client not initialized. Please set OPENAI_API_KEY environment variable or provide API key.")
+                error_msg = "OpenAI client not initialized. Please set OPENAI_API_KEY environment variable or provide API key."
+                return (primary_image, f"Error: {error_msg}", error_msg)
             client = self.client
+            debug_info.append("Using environment API key")
         
         try:
             # Get optimized prompt for fashion use case
             final_prompt = self.get_fashion_prompt(fashion_preset, prompt)
+            debug_info.append(f"Fashion preset: {fashion_preset}")
+            debug_info.append(f"Final prompt: {final_prompt[:100]}...")
             
-            # Prepare images
-            images, processed_mask = self.prepare_images_for_api(primary_image, reference_image, mask_image)
+            # Decide which API to use
+            use_responses_api = (api_method == "responses_api" or 
+                               reference_image is not None)
             
-            # Prepare API call parameters
-            api_params = {
-                "model": "gpt-image-1",
-                "prompt": final_prompt,
-                "input_fidelity": input_fidelity,
-                "quality": quality,
-                "size": size,
-                "output_format": output_format,
-                "response_format": "b64_json"
-            }
-            
-            # Add background parameter if not auto
-            if background != "auto":
-                api_params["background"] = background
-            
-            # Handle single image edit vs multi-image generation
-            if len(images) == 1 and processed_mask is None:
-                # Simple image edit
-                primary_pil = self.tensor_to_pil(primary_image)
-                buffer = io.BytesIO()
-                primary_pil.save(buffer, format="PNG")
-                buffer.seek(0)
-                
-                response = client.images.edit(
-                    image=buffer,
-                    **api_params
+            if use_responses_api:
+                debug_info.append("Using Responses API")
+                response, api_used = self.edit_with_responses_api(
+                    client, primary_image, reference_image, final_prompt,
+                    input_fidelity, quality, size, output_format, background
                 )
+                image_base64, revised_prompt = self.process_responses_api_response(response)
             else:
-                # Multi-image or masked edit
-                if processed_mask is not None:
-                    mask_pil = self.tensor_to_pil(processed_mask)
-                    mask_buffer = io.BytesIO()
-                    mask_pil.save(mask_buffer, format="PNG")
-                    mask_buffer.seek(0)
-                    api_params["mask"] = mask_buffer
-                
-                primary_pil = self.tensor_to_pil(primary_image)
-                buffer = io.BytesIO()
-                primary_pil.save(buffer, format="PNG")
-                buffer.seek(0)
-                
-                response = client.images.edit(
-                    image=buffer,
-                    **api_params
+                debug_info.append("Using Images API")
+                response, api_used = self.edit_with_images_api(
+                    client, primary_image, mask_image, final_prompt,
+                    input_fidelity, quality, size, output_format, background
                 )
+                image_base64, revised_prompt = self.process_images_api_response(response)
             
-            # Process response
-            if hasattr(response, 'data') and len(response.data) > 0:
-                result_data = response.data[0]
-                
-                # Get image data
-                if hasattr(result_data, 'b64_json'):
-                    image_base64 = result_data.b64_json
-                else:
-                    raise Exception("No image data in response")
-                
-                # Get revised prompt if available
-                revised_prompt = getattr(result_data, 'revised_prompt', final_prompt)
-                
-                # Decode and convert image
-                image_bytes = base64.b64decode(image_base64)
-                result_image = Image.open(io.BytesIO(image_bytes))
-                
-                # Convert back to ComfyUI tensor
-                result_tensor = self.pil_to_tensor(result_image)
-                
-                return (result_tensor, revised_prompt)
-            else:
-                raise Exception("No data received from OpenAI API")
+            debug_info.append(f"API used: {api_used}")
+            debug_info.append(f"Input fidelity: {input_fidelity}")
+            
+            # Decode and convert image
+            image_bytes = base64.b64decode(image_base64)
+            result_image = Image.open(io.BytesIO(image_bytes))
+            
+            # Convert back to ComfyUI tensor
+            result_tensor = self.pil_to_tensor(result_image)
+            
+            debug_info.append("Success: Image generated successfully")
+            debug_str = " | ".join(debug_info)
+            
+            return (result_tensor, revised_prompt, debug_str)
                 
         except Exception as e:
-            print(f"Error in fashion image generation: {e}")
+            error_msg = f"Error in fashion image generation: {str(e)}"
+            debug_info.append(error_msg)
+            debug_str = " | ".join(debug_info)
+            print(error_msg)
+            
             # Return original image and error message
-            return (primary_image, f"Error: {str(e)}")
+            return (primary_image, f"Error: {str(e)}", debug_str)
 
 # Node registration for ComfyUI
 NODE_CLASS_MAPPINGS = {
