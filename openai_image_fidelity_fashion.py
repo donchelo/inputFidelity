@@ -1,8 +1,6 @@
 import os
 import io
 import base64
-import requests  # NUEVO: Para Airtable
-import json      # NUEVO: Para Airtable
 import torch
 import numpy as np
 from PIL import Image, ImageOps
@@ -34,7 +32,7 @@ def load_config_file():
                 continue
     
     # Intentar usar variables de entorno del sistema
-    if os.getenv('OPENAI_API_KEY') and os.getenv('AIRTABLE_API_KEY'):
+    if os.getenv('OPENAI_API_KEY'):
         print("✅ Usando variables de entorno del sistema")
         return True
         
@@ -50,9 +48,6 @@ class OpenAIImageFidelityFashion:
     
     def __init__(self):
         self.client = None
-        # NUEVO: Variables para control de iteraciones
-        self.client_id = "clienteTRUE"
-        self.table_name = "inputFidelity"
         # Cargar configuración
         load_config_file()
         self.initialize_client()
@@ -69,63 +64,6 @@ class OpenAIImageFidelityFashion:
         except Exception as e:
             print(f"Error initializing OpenAI client: {e}")
     
-    # NUEVO: Función para control de iteraciones
-    def check_and_consume_iteration(self, api_key, base_id):
-        """Verifica y consume 1 iteración para clienteTRUE"""
-        if not api_key or not base_id:
-            return False, "❌ Credenciales de Airtable requeridas", 0
-        
-        try:
-            url = f"https://api.airtable.com/v0/{base_id}/{self.table_name}"
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            }
-            
-            params = {
-                "filterByFormula": f"{{id_cliente}} = '{self.client_id}'"
-            }
-            
-            # Consultar iteraciones actuales
-            response = requests.get(url, headers=headers, params=params)
-            
-            if response.status_code != 200:
-                return False, f"❌ Error consultando Airtable: {response.status_code}", 0
-            
-            data = response.json()
-            
-            if not data.get('records'):
-                return False, f"❌ Cliente '{self.client_id}' no encontrado", 0
-            
-            # Obtener iteraciones actuales
-            record = data['records'][0]
-            record_id = record['id']
-            current_iterations = record['fields'].get('iteraciones_restantes', 0)
-            
-            # Verificar disponibilidad
-            if current_iterations <= 0:
-                return False, "🚫 Sin iteraciones disponibles. Contacta al administrador para recargar.", 0
-            
-            # Decrementar iteraciones
-            new_iterations = current_iterations - 1
-            
-            # Actualizar en Airtable
-            update_url = f"{url}/{record_id}"
-            update_data = {
-                "fields": {
-                    "iteraciones_restantes": new_iterations
-                }
-            }
-            
-            update_response = requests.patch(update_url, headers=headers, json=update_data)
-            
-            if update_response.status_code != 200:
-                return False, f"❌ Error actualizando iteraciones: {update_response.status_code}", current_iterations
-            
-            return True, f"✅ Uso autorizado. Quedan {new_iterations} iteraciones", new_iterations
-            
-        except Exception as e:
-            return False, f"❌ Error de conexión: {str(e)}", 0
     
     @classmethod
     def INPUT_TYPES(cls):
@@ -161,8 +99,8 @@ class OpenAIImageFidelityFashion:
         }
     
     # Return types for ComfyUI
-    RETURN_TYPES = ("IMAGE", "STRING", "STRING", "INT")
-    RETURN_NAMES = ("image", "revised_prompt", "debug_info", "remaining_iterations")
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING")
+    RETURN_NAMES = ("image", "revised_prompt", "debug_info")
     FUNCTION = "generate_fashion_image"
     CATEGORY = "OpenAI/Fashion"
     
@@ -379,40 +317,15 @@ class OpenAIImageFidelityFashion:
         else:
             raise Exception("No output received from Responses API")
     
-    # MODIFICADO: Añadir parámetros para control de iteraciones
     def generate_fashion_image(self, prompt, primary_image, input_fidelity, quality, size,
                            output_format, background, fashion_preset, api_method,
                            reference_image=None, mask_image=None):
-        enable_iterations_control = True  # Always active
         debug_info = []
-        remaining_iterations = 0
-        
-        # ITERATION CONTROL - Always active
-        if enable_iterations_control:
-            airtable_key = os.getenv('AIRTABLE_API_KEY', '')
-            airtable_base = os.getenv('AIRTABLE_BASE_ID', '')
-            
-            if not airtable_key or not airtable_base:
-                error_msg = "❌ Se requieren credenciales de Airtable para control de iteraciones"
-                return (primary_image, f"ERROR: {error_msg}", error_msg, 0)
-            
-            success, message, remaining_iterations = self.check_and_consume_iteration(
-                airtable_key, airtable_base
-            )
-            
-            if not success:
-                debug_info.append(f"ACCESO BLOQUEADO: {message}")
-                debug_str = " | ".join(debug_info)
-                return (primary_image, f"ERROR: {message}", debug_str, remaining_iterations)
-            
-            debug_info.append(f"✅ {message}")
-        else:
-            debug_info.append("⚠️ Control de iteraciones deshabilitado")
         
         # Initialize OpenAI client
         if not self.client:
             error_msg = "OpenAI client not initialized. Please set OPENAI_API_KEY in config.env"
-            return (primary_image, f"Error: {error_msg}", error_msg, remaining_iterations)
+            return (primary_image, f"Error: {error_msg}", error_msg)
 
         client = self.client
         debug_info.append("Using environment API key from config.env")
@@ -455,8 +368,8 @@ class OpenAIImageFidelityFashion:
             debug_info.append("Success: Image generated successfully")
             debug_str = " | ".join(debug_info)
             
-            # Return successful result with remaining_iterations
-            return (result_tensor, revised_prompt, debug_str, remaining_iterations)
+            # Return successful result
+            return (result_tensor, revised_prompt, debug_str)
                 
         except Exception as e:
             error_msg = f"Error in fashion image generation: {str(e)}"
@@ -464,8 +377,8 @@ class OpenAIImageFidelityFashion:
             debug_str = " | ".join(debug_info)
             print(error_msg)
             
-            # Return error with remaining_iterations
-            return (primary_image, f"Error: {str(e)}", debug_str, remaining_iterations)
+            # Return error
+            return (primary_image, f"Error: {str(e)}", debug_str)
 
 # Node registration for ComfyUI
 NODE_CLASS_MAPPINGS = {
